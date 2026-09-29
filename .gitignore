@@ -1,0 +1,10 @@
+# 忽略本地构建结果
+bin/
+
+# 忽略IDE配置文件
+.vs/
+.vscode/
+
+# 忽略项目测试构建结果
+Source/bin/
+Source/obj/
