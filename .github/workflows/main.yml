@@ -1,0 +1,118 @@
+name: Publish Release
+
+# 只在主分支上推送版本tag时自动发版
+on:
+  push:
+    branches:
+      - master
+    tags:
+      - "[0-9]+.[0-9]+.[0-9]+(.*)"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ------------------------------------------------------------------
+      # 1. 查出 Everest 最新发行的 tag，专门用来做缓存 key
+      # ------------------------------------------------------------------
+      - name: Resolve Everest version
+        id: everest
+        run: |
+          TAG=$(curl -sSL \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${{ github.token }}" \
+            https://api.github.com/repos/EverestAPI/Everest/releases/latest \
+            | jq -r .tag_name)
+          if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
+            echo "无法解析 Everest 版本号" >&2
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Everest 最新发行: $TAG"
+
+      # ------------------------------------------------------------------
+      # 2. 尝试从缓存取回剥离版引用库
+      # ------------------------------------------------------------------
+      # 缓存内容就是解压好的 lib-stripped/ 目录本身。
+      # key 里带上 Everest tag，所以只有 Everest 发新版本时才会失效。
+      - name: Cache lib-stripped
+        id: lib-cache
+        uses: actions/cache@v4
+        with:
+          path: lib-stripped
+          key: lib-stripped-${{ steps.everest.outputs.tag }}-${{ runner.os }}
+
+      # ------------------------------------------------------------------
+      # 3. 仅在缓存未命中时下载 + 解压
+      # ------------------------------------------------------------------
+      # 用 action 自带的 extract 选项，省掉手动 unzip。
+      - name: Download lib-stripped (cache miss)
+        if: steps.lib-cache.outputs.cache-hit != 'true'
+        uses: robinraju/release-downloader@v1.11
+        with:
+          repository: EverestAPI/Everest
+          latest: true
+          fileName: lib-stripped.zip
+          out-file-path: lib-stripped-download
+          extract: true
+          extract-path: lib-stripped
+
+      # ------------------------------------------------------------------
+      # 4. NuGet 包缓存
+      # ------------------------------------------------------------------
+      # key 基于 csproj 的哈希，所以依赖一变就会重新还原。
+      # 额外用 restore-keys 兜底，方便命中"上一次"的缓存。
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('Source/*.csproj') }}
+          restore-keys: |
+            nuget-${{ runner.os }}-
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Restore
+        run: dotnet restore Source/PeakStamina.csproj
+
+      # Release 配置会触发 csproj 里的 PackageMod 目标，自动生成 PeakStamina.zip
+      - name: Build
+        run: dotnet build Source/PeakStamina.csproj -c Release --no-restore
+        env:
+          # 路径必须由 $(github.workspace) 推导 —— 前面的下载/解压步骤
+          # 可能已经改变过工作目录，写 "." 会解析到错误位置。
+          CelestePrefix: ${{ github.workspace }}/lib-stripped
+
+      - name: Locate package
+        id: pkg
+        run: |
+          # 兼容两种情况：仓库根目录就是 PeakStamina/，或它下面还套一层
+          ROOT="$GITHUB_WORKSPACE"
+          [ -f "$ROOT/everest.yaml" ] || ROOT="$GITHUB_WORKSPACE/PeakStamina"
+          echo "root=$ROOT" >> "$GITHUB_OUTPUT"
+          test -f "$ROOT/PeakStamina.zip" || { echo "未找到 PeakStamina.zip" >&2; exit 1; }
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PeakStamina
+          path: ${{ steps.pkg.outputs.root }}/PeakStamina.zip
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.pkg.outputs.root }}/PeakStamina.zip
+          generate_release_notes: true
+          fail_on_unmatched_files: true
