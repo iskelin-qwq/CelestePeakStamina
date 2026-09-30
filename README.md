@@ -297,6 +297,21 @@ new Damage {
 - 伤害表里**没有**这个类型 → **什么都不做**
 - 伤害表里**已有**这个类型 → 数值减掉，**减到 ≤ 0 就把整条移除**
 
+**设置规则**（由 `DamageAccumulator.Set` 负责，绝对赋值）：
+
+- 伤害表里**已有**这个类型：
+  - `Number <= 0` → **移除**该条目
+  - 否则 → 把数值**设置**为 `Number`
+- 伤害表里**没有**这个类型：
+  - `Number <= 0` → **什么都不做**
+  - 否则 → **追加到最后面**
+
+> 三种操作的分工：`Apply` 是**累加**、`Heal` 是**减掉**、`Set` 是**赋值**。
+>
+> `Set` 里 **`0` 和负数都表示"移除"**：伤害表是"扣了多少上限"的账本，
+> 数值为 0 意味着这种伤害没造成任何扣减，留一条 0 在表里没有意义
+> （还会在体力条上占一个零宽度段）。所以 `<= 0` 一律当作"删除这条记录"。
+
 **体力上限是派生值**，不单独存储：
 
 ```
@@ -311,14 +326,30 @@ new Damage {
 
 ```csharp
 public static class DamageColors {
-    public const string Harm = "Harm";
+    public const string Harm   = "Harm";     // 摔落
+    public const string Hunger = "Hunger";   // 饥饿
+    public const string Weight = "Weight";   // 负重
 
     private static readonly Dictionary<string, Color> Table = new() {
-        { Harm, new Color(0xE0, 0x3A, 0x3A) },   // 摔落伤害 = 红色
-        // 新增类型在这里加一行即可
+        { Harm,   new Color(0xE0, 0x3A, 0x3A) },   // 红
+        { Hunger, new Color(0xF2, 0xC7, 0x44) },   // 黄
+        { Weight, new Color(0x8B, 0x5A, 0x2B) },   // 棕
+        // 新增类型在这里加两行（一个常量 + 一条颜色）即可
     };
 }
 ```
+
+**当前已登记的类型：**
+
+| 常量 | 字符串值 | 颜色 | 色号 | 来源 |
+|---|---|---|---|---|
+| `DamageColors.Harm` | `"Harm"` | 🔴 红 | `#E03A3A` | 摔落伤害 |
+| `DamageColors.Hunger` | `"Hunger"` | 🟡 黄 | `#F2C744` | 饥饿伤害 |
+| `DamageColors.Weight` | `"Weight"` | 🟤 棕 | `#8B5A2B` | 负重伤害 |
+| （未登记的任意名字）| — | 🟣 洋红 | `#FF00FF` | 兜底，提示"忘了登记" |
+
+> 💡 `damageType` 是 `string` 而不是 `enum`，所以**编译器不会检查拼写**。
+> 尽量用 `DamageColors.XXX` 常量，别手写字符串——写错会被当成一种全新类型。
 
 给玩家施加伤害（比如将来的尖刺、Boss 攻击）：
 
@@ -358,6 +389,12 @@ int healed = PeakStaminaInterop.Heal(player, DamageColors.Harm, 20);
 // 治饥饿
 PeakStaminaInterop.Heal(player, DamageColors.Hunger, 10);
 
+// 把摔落伤害【直接设定】为 20 点（不是累加，也不是减）
+PeakStaminaInterop.SetDamage(player, DamageColors.Harm, 20);
+
+// 负数 = 移除该类型的伤害
+PeakStaminaInterop.SetDamage(player, "Spike", -1);
+
 // 查询类
 float cap        = PeakStaminaInterop.GetStaminaCap(player);            // 当前体力上限
 int   harmAmount = PeakStaminaInterop.GetDamageAmount(player, DamageColors.Harm);  // 摔落伤害累计
@@ -367,9 +404,33 @@ bool  enabled    = PeakStaminaInterop.IsEnabled();                     // 本 mo
 | 方法 | 说明 |
 |---|---|
 | `Heal(player, damageType, amount)` | 治掉指定类型的伤害，返回**实际治好**的点数 |
+| `SetDamage(player, damageType, amount)` | **绝对设置**该类型伤害，返回设置后的数值 |
 | `GetStaminaCap(player)` | 当前体力上限（= 110 − 所有伤害之和）|
 | `GetDamageAmount(player, damageType)` | 该类型累计扣掉了多少上限 |
 | `IsEnabled()` | 本 mod 当前是否启用（玩家可能在设置里关掉了）|
+
+##### `Heal` 和 `SetDamage` 的区别
+
+这两个容易混，区别在于**是"加减"还是"赋值"**：
+
+| | 原本 25 点 | 调用后 |
+|---|---|---|
+| `Heal(..., 10)` | 25 | **15**（减掉 10）|
+| `SetDamage(..., 10)` | 25 | **10**（设定成 10）|
+
+`SetDamage` 的完整规则：
+
+| 向量里 | `amount` | 行为 |
+|---|---|---|
+| **已有**该类型 | `<= 0` | **移除**该条目 |
+| **已有**该类型 | `> 0` | 把数值**设置**为 `amount` |
+| **没有**该类型 | `<= 0` | **什么都不做**（没有东西可移除）|
+| **没有**该类型 | `> 0` | **追加到最后面**（位置影响体力条的渲染顺序）|
+
+> 💡 `0` 和负数效果相同，都是"移除"——因为数值为 0 的伤害条目没有意义。
+
+> 💡 `SetDamage` 适合"保证某种状态"的需求，例如"戴着某道具时摔伤恰好为 20 点"——
+> 不受之前已经累积了多少的影响。
 
 > **安全性**：所有方法内部都做了空引用检查和启用状态检查。
 > 玩家为空、mod 被关掉、伤害表里没有该类型——都会安全返回 `0`，**不会抛异常**，调用方不需要自己判空。
@@ -387,6 +448,8 @@ bool  enabled    = PeakStaminaInterop.IsEnabled();                     // 本 mo
 | ① | **绿色** | 剩余体力 | 当前体力 ÷ 110 |
 | ② | **黑色** | 已消耗的体力 | (当前上限 − 当前体力) ÷ 110 |
 | ③④⑤… | **各伤害类型的颜色** | 按伤害表顺序逐段渲染 | 该类型 Number ÷ 110 |
+
+伤害段用的就是上面「登记新的伤害类型」里的颜色表——目前是**红（摔落）/ 黄（饥饿）/ 棕（负重）**。
 
 关键在于**绿 + 黑的总长 = 当前上限**，所以黑段的右端就是"现在的上限位置"，之后接的就是各种永久伤害。
 
@@ -494,7 +557,7 @@ dotnet build Source/PeakStamina.csproj -c Release
 | `Source/StaminaBarEntity.cs` | 体力条实体 + 渲染（绿 / 黑 / 各伤害类型分段） |
 | `Source/PeakStaminaModuleSession.cs` | 存伤害向量，体力上限由它派生（生命周期 = 一局游戏） |
 | `Source/PeakStaminaModuleSettings.cs` | 两个设置项 |
-| `Source/PeakStaminaInterop.cs` | 对外公开接口（供其他 mod 调用治疗 / 查询）|
+| `Source/PeakStaminaInterop.cs` | 对外公开接口（供其他 mod 调用治疗 / 设置 / 查询）|
 | `Source/PeakStaminaModuleSaveData.cs` | 预留（目前为空） |
 
 ### 几个关键设计

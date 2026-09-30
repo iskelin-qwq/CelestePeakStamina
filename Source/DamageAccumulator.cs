@@ -19,10 +19,14 @@ public static class DamageColors {
     // 饥饿伤害 —— 黄色（网页色号 #F2C744）
     public const string Hunger = "Hunger";
 
+    // 负重伤害 —— 棕色（网页色号 #8B5A2B）
+    public const string Weight = "Weight";
+
     // 类型名 → 颜色
     private static readonly Dictionary<string, Color> Table = new() {
-        { Harm,   new Color(0xE0, 0x3A, 0x3A) },
-        { Hunger, new Color(0xF2, 0xC7, 0x44) },
+        { Harm,   new Color(0xE0, 0x3A, 0x3A) },   // 红
+        { Hunger, new Color(0xF2, 0xC7, 0x44) },   // 黄
+        { Weight, new Color(0x8B, 0x5A, 0x2B) },   // 棕
     };
 
     // 未登记类型时用的兜底色（洋红，方便一眼看出"忘了登记颜色"）
@@ -151,5 +155,59 @@ public static class DamageAccumulator {
 
         // 没找到同类型 → 什么都不做
         return 0;
+    }
+
+    // ------------------------------------------------------------------
+    //  绝对设置
+    // ------------------------------------------------------------------
+    // 和 Apply（累加）/ Heal（减掉）都不同 —— 这个是【直接设定成某个值】。
+    //
+    //   列表里已有这个类型：
+    //       incoming.Number <= 0 → 把该条目【移除】
+    //       否则                 → 把该条目的数值【设置为】incoming.Number
+    //   列表里没有这个类型：
+    //       incoming.Number <= 0 → 什么都不做（没有东西可移除）
+    //       否则                 → 追加到列表【最后面】
+    //
+    // 返回：设置后该类型的数值。被移除或没找到且非正时返回 0。
+    //
+    // ★ 为什么 0 和负数都表示"移除"：
+    //   伤害表是"扣了多少上限"的账本。数值为 0 意味着这种伤害没造成任何扣减，
+    //   留一条 0 在表里没有意义（还会在体力条上占一个零宽度段）。
+    //   所以 <= 0 一律当作"删除这条记录"。
+    public static int Set(List<Damage> damages, Damage incoming) {
+        if (damages == null || incoming == null) {
+            return 0;
+        }
+
+        for (int i = 0; i < damages.Count; i++) {
+            Damage existing = damages[i];
+
+            if (existing == null || existing.DamageType != incoming.DamageType) {
+                continue;
+            }
+
+            // <= 0 → 移除该条目
+            if (incoming.Number <= 0) {
+                damages.RemoveAt(i);
+                return 0;
+            }
+
+            // 否则直接覆盖数值
+            existing.Number = incoming.Number;
+            existing.DamageColor = DamageColors.Get(existing.DamageType);
+            return existing.Number;
+        }
+
+        // 没有同类型：非正数无从移除，直接忽略
+        if (incoming.Number <= 0) {
+            return 0;
+        }
+
+        // 追加到列表最后面（位置影响体力条上的渲染顺序）
+        incoming.DamageColor = DamageColors.Get(incoming.DamageType);
+        damages.Add(incoming);
+
+        return incoming.Number;
     }
 }

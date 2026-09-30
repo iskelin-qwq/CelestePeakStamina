@@ -48,6 +48,36 @@ public static class PeakStaminaInterop {
     }
 
     // ------------------------------------------------------------------
+    //  ★ 设置伤害（绝对赋值）
+    // ------------------------------------------------------------------
+    // 把某一种伤害【直接设定】成指定数值 —— 不是累加，也不是减掉。
+    //
+    //   amount <= 0 → 移除该类型的伤害（本来就没有的话，什么都不做）
+    //   amount > 0  → 把该类型伤害设定为 amount
+    //                 （本来没有该类型的话，就新追加一条）
+    //
+    // 返回：设置后该类型的数值。被移除或忽略时返回 0。
+    //
+    // ★ 和 Heal 的区别（容易混）：
+    //   Heal      是"减掉多少"  —— 治 10 点，原本有 25 → 剩 15
+    //   SetDamage 是"设定成多少" —— 设成 10 点，原本有 25 → 变成 10
+    //
+    // 适合"保证某种状态"的需求，例如"戴着某道具时摔伤恰好为 20 点"。
+    //
+    // 用法：
+    //   PeakStaminaInterop.SetDamage(player, DamageColors.Harm, 20);   // 摔伤设为 20
+    //   PeakStaminaInterop.SetDamage(player, "Spike", 0);              // 移除尖刺伤害
+    public static int SetDamage(Player player, string damageType, int amount) {
+        StaminaTracker tracker = GetTracker(player);
+
+        if (tracker == null || string.IsNullOrEmpty(damageType)) {
+            return 0;
+        }
+
+        return tracker.SetDamage(DamageColors.Create(damageType, amount));
+    }
+
+    // ------------------------------------------------------------------
     //  ★ 查询类接口
     // ------------------------------------------------------------------
 
