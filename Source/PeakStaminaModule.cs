@@ -209,14 +209,31 @@ public class PeakStaminaModule : EverestModule {
         tracker?.OnPlayerJumpAction();
     }
 
-    // 玩家爬墙跳：原版自己会扣 27.5 体力，而且它内部还会调用一次 Jump()。
+    // 玩家爬墙跳：这里要做两件事。
     //
-    // ★ 所以要立个标记，让紧接着的那次 Jump 不要重复计费 ——
-    //   否则我们会用"基准 − 10"覆盖掉原版的 27.5，净消耗反而变成 10。
+    // ★ 第一件：让紧接着的那次 Jump 不要重复计费 ——
+    //   ClimbJump 内部会调用一次 Jump()，而原版自己已经扣过 27.5 体力了。
+    //   如果不标记，我们会用"基准 − 10"覆盖掉原版的 27.5，净消耗反而变成 10。
     //
     //   原版 ClimbJump 的 IL 实测顺序：
     //       Stamina = Stamina - 27.5f;   ← 先扣
     //       Jump();                      ← 再调 Jump（触发我们的钩子）
+    //
+    // ★ 第二件：封掉"偷体力跳"（wall boost）——
+    //   ClimbJump 还会把 wallBoostTimer 设成 0.2 秒、wallBoostDir 设成 dir。
+    //   之后玩家只要在这 0.2 秒内朝墙方向推，原版 NormalUpdate 里这段就会触发：
+    //
+    //       if (wallBoostTimer > 0 && moveX == wallBoostDir) {
+    //           Speed.X = 130f * moveX;      // 位移加速
+    //           Stamina += 27.5f;            // ★ 把爬墙跳的体力还回来 = 偷体力
+    //       }
+    //
+    //   于是爬墙跳变成零消耗。我们在 orig 之后把计时器清零，
+    //   那个 if 就永远不成立，体力不会再被返还。
+    //
+    //   （顺带一提：这段里的位移加速也一起没了。两者写在同一个代码块里，
+    //     没法只砍一个。但那个加速只在"朝墙推"时触发，而墙跳后朝墙推
+    //     本身就是自毁操作，所以实战代价可以忽略。）
     private static void OnPlayerClimbJump(On.Celeste.Player.orig_ClimbJump orig, Player player) {
         StaminaTracker tracker = player.Components.Get<StaminaTracker>();
 
@@ -224,6 +241,10 @@ public class PeakStaminaModule : EverestModule {
 
         try {
             orig(player);
+
+            // 抹掉原版刚开启的回墙加速窗口。
+            // 放在 orig 之后：那时它才被设成 0.2f。
+            player.wallBoostTimer = 0f;
         } finally {
             // 放在 finally 里，保证即使中途抛异常也不会把标记留下来
             tracker?.EndClimbJump();

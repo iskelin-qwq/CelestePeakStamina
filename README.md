@@ -18,7 +18,7 @@
 
 体力上限默认 **110 点**（原版满值）。
 
-在该mod启用时，**偷体力跳不会再返还体力**
+> 📌 本 mod 也**封禁了"偷体力跳"**（爬墙跳后返体力），详见「二、动作代价」一节。
 
 从高空落地时会扣**上限**——不是临时消耗，而是永久削减，直到死亡或重进关卡才恢复：
 
@@ -52,12 +52,19 @@ internal const int   DamagePerTick  = 5;    // 每跳扣多少
 摔落高度 = 起跳时的 Y 坐标 − 落地时的 Y 坐标。**起跳点**会在下面三种时刻被重置：
 
 1. **起跳时**（跳跃 / 墙跳）
-2. **刚抓住墙壁时**
+2. **攀爬期间（每一帧都重置）**
 3. **刚开始空中冲刺时**（任何方向都算）
 
 所以跳起来再落回原高度是 **0 摔落**，不会因为"跳跃的最高点"而白白扣血。走出悬崖时则以悬崖边的高度为起点。
 
-> 💡 第 3 条是**机动性补偿**：从高处掉下来时可以用冲刺"接住"自己，
+> 💡 **第 2 条是"整段攀爬持续重置"**，不是只在抓住墙那一帧重置。
+> 效果是：只要人在攀爬状态，摔落起点就始终是**当前所在高度**——
+> 挂在墙上怎么上下移动都不算摔落，从墙上松手时落差也是从松手位置开始算。
+>
+> （反过来说，如果改成"只在抓墙那一帧重置"，那"爬到墙顶再松手掉下来"
+> 就会被算成从抓墙点起算的巨大落差。当前设定是刻意选择前者的。）
+
+> 💡 **第 3 条是机动性补偿**：从高处掉下来时可以用冲刺"接住"自己，
 > 冲刺的起点会成为新的摔落起点，从而少受伤。
 > 所以它**不限冲刺方向**——水平、向上、向下冲刺都算（这一条修过一个 bug：
 > 早期实现只认向下冲刺，导致摔下来时水平冲刺救不了命）。
@@ -141,6 +148,38 @@ private const float UltraSpeedSquared = 40000f;    // 200²
 > 所以必须识别出"这次 `Jump` 来自爬墙跳"并跳过我们自己的计费，
 > 否则会用"−10"覆盖掉原版那次扣费，净消耗反而只剩 10 点。
 > 这个识别由 `ClimbJump` 钩子上的标记（`BeginClimbJump` / `EndClimbJump`）完成。
+
+#### 封禁"偷体力跳"（wall boost）
+
+原版有一个公认的技巧：**爬墙跳后在短暂窗口内朝墙方向推，会把刚扣掉的 27.5 体力还回来**，
+于是爬墙跳变成零消耗。本 mod **把它封掉了**。
+
+机制（Cecil 扫遍 `Player` 所有方法得到的确切写入点）：
+
+```
+ClimbJump
+  ├─ Stamina = Stamina - 27.5f      ← 原版先扣
+  ├─ Jump()                          ← 再调 Jump
+  ├─ wallBoostDir   = dir
+  └─ wallBoostTimer = 0.2f           ← 开启 0.2 秒窗口（只有这里会设正值）
+        ↓
+NormalUpdate 里：
+  if (wallBoostTimer > 0 && moveX == wallBoostDir) {
+      Speed.X = 130f * moveX;        // 位移加速
+      Stamina += 27.5f;              // ★ 把体力还回来 = 偷体力
+      wallBoostTimer = 0f;
+  }
+```
+
+**我们的做法**：在 `ClimbJump` 钩子里，`orig` 返回后立刻把 `wallBoostTimer` 清零 ——
+那个 `if` 就永远不成立，体力不会再被返还。
+
+> ⚠️ **副作用**：同一个代码块里的**位移加速也一起没了**。
+> 两者无法只砍一个，但那个加速只在"朝墙推"时触发，
+> 而墙跳之后朝墙推本身就是自毁操作，所以实战代价可以忽略。
+
+> 📌 实现位置：`Source/PeakStaminaModule.cs` 的 `OnPlayerClimbJump`
+> （和上面那条"爬墙跳不重复计费"共用同一个钩子，没有重复挂钩子）。
 
 体力**不足时动作照常执行**，只是扣到 0 为止——不会因为"付不起"而做不出动作。
 
@@ -304,6 +343,41 @@ tracker.Heal(DamageColors.Create("Spike", 10));
 
 未登记的类型会显示成**洋红色**，方便一眼看出"忘了登记颜色"。
 
+#### 给其他 mod 调用（公开接口）
+
+其他 mod 可以直接引用 `PeakStamina.dll`，通过 **`PeakStaminaInterop`** 调用，不需要了解内部结构：
+
+```csharp
+using Celeste.Mod.PeakStamina;
+
+Player player = level.Tracker.GetEntity<Player>();
+
+// 治好 20 点摔落伤害（上限随之回升），返回实际治好的点数
+int healed = PeakStaminaInterop.Heal(player, DamageColors.Harm, 20);
+
+// 治饥饿
+PeakStaminaInterop.Heal(player, DamageColors.Hunger, 10);
+
+// 查询类
+float cap        = PeakStaminaInterop.GetStaminaCap(player);            // 当前体力上限
+int   harmAmount = PeakStaminaInterop.GetDamageAmount(player, DamageColors.Harm);  // 摔落伤害累计
+bool  enabled    = PeakStaminaInterop.IsEnabled();                     // 本 mod 是否启用
+```
+
+| 方法 | 说明 |
+|---|---|
+| `Heal(player, damageType, amount)` | 治掉指定类型的伤害，返回**实际治好**的点数 |
+| `GetStaminaCap(player)` | 当前体力上限（= 110 − 所有伤害之和）|
+| `GetDamageAmount(player, damageType)` | 该类型累计扣掉了多少上限 |
+| `IsEnabled()` | 本 mod 当前是否启用（玩家可能在设置里关掉了）|
+
+> **安全性**：所有方法内部都做了空引用检查和启用状态检查。
+> 玩家为空、mod 被关掉、伤害表里没有该类型——都会安全返回 `0`，**不会抛异常**，调用方不需要自己判空。
+>
+> **为什么不用 Everest 的 interop 注册？** Everest 的跨 mod 互操作是**反射驱动的动态机制**，
+> 并没有一个强类型的"注册 API"可以调用（`Celeste.dll` / `Celeste.Mod.mm.dll` 里都不存在
+> `RegisterAPI` 这类成员）。用普通 `public static` 类，任何 Everest 版本都能用，而且编译期就能检查参数。
+
 #### 体力条
 
 角色脚下会显示一条浮空的体力条（`SubHUD` 层，永远画在地形之上，不会被前景遮挡）。整条**由左到右**渲染：
@@ -420,6 +494,7 @@ dotnet build Source/PeakStamina.csproj -c Release
 | `Source/StaminaBarEntity.cs` | 体力条实体 + 渲染（绿 / 黑 / 各伤害类型分段） |
 | `Source/PeakStaminaModuleSession.cs` | 存伤害向量，体力上限由它派生（生命周期 = 一局游戏） |
 | `Source/PeakStaminaModuleSettings.cs` | 两个设置项 |
+| `Source/PeakStaminaInterop.cs` | 对外公开接口（供其他 mod 调用治疗 / 查询）|
 | `Source/PeakStaminaModuleSaveData.cs` | 预留（目前为空） |
 
 ### 几个关键设计

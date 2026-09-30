@@ -90,8 +90,9 @@ public class StaminaTracker : Component {
     // 上一帧玩家在不在空中。用来找"刚落地"的那一帧。
     private bool wasOnGround;
 
-    // 上一帧在不在攀爬 / 冲刺状态。用来找"刚进入攀爬/冲刺"的那一帧。
-    private bool wasClimbing;
+    // 上一帧在不在冲刺状态。用来找"刚进入冲刺"的那一帧。
+    // （攀爬不再需要这个 —— 现在攀爬期间每帧都重置参考高度，
+    //   不需要判断"刚进入"，所以没有 wasClimbing 了。）
     private bool wasDashing;
 
     // 宽限期倒计时。归零之后才开始算摔落伤害。
@@ -745,9 +746,8 @@ public class StaminaTracker : Component {
         fallReferenceY = player.Y;
         graceTimer = SpawnGraceTime;
 
-        // 重置"上一帧状态"，避免刚重试就误判成"刚落地 / 刚进攀爬"
+        // 重置"上一帧状态"，避免刚重试就误判成"刚落地 / 刚进冲刺"
         wasOnGround = true;
-        wasClimbing = player.StateMachine.State == Player.StClimb;
         wasDashing  = player.StateMachine.State == Player.StDash
                    || player.StateMachine.State == Player.StRedDash;
 
@@ -900,14 +900,17 @@ public class StaminaTracker : Component {
             fallReferenceInitialized = true;
 
         } else if (climbing) {
-            // 规则 2：抓住墙壁后重置参考高度。
-            // 这里选在"刚开始攀爬的那一帧"重置一次，而不是攀爬过程中每帧都重置 ——
-            // 因为后者会让玩家每往上挪一点就把参考高度顶上去，
-            // 结果"爬到墙顶再松手掉下来"会算成零伤害。
-            if (!wasClimbing) {
-                fallReferenceY = player.Y;
-                fallReferenceInitialized = true;
-            }
+            // 规则 2：攀爬期间【每一帧】都重置参考高度。
+            //
+            // 效果：只要人在攀爬状态，摔落起点就始终是"当前所在高度"。
+            // 所以挂在墙上怎么下滑都不算摔落，等到从墙上松手时，
+            // 落差也是从松手那一刻的位置开始算。
+            //
+            // 这里刻意【不加】`!wasClimbing` 之类的"只重置一次"限制 ——
+            // 那会让参考高度停在刚抓住墙的位置，于是"爬到墙顶再松手掉下来"
+            // 会被算成从抓墙点起算的巨大落差。
+            fallReferenceY = player.Y;
+            fallReferenceInitialized = true;
 
         } else {
             // 下降冲刺的重置已经在上面 ② 里处理掉了（只记一次）。
@@ -915,7 +918,6 @@ public class StaminaTracker : Component {
         }
 
         wasOnGround = onGround;
-        wasClimbing = climbing;
         wasDashing  = dashing;
     }
 
