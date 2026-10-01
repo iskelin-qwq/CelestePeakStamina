@@ -41,6 +41,7 @@ public class PeakStaminaModule : EverestModule {
         On.Celeste.Player.Jump += OnPlayerJump;
         On.Celeste.Player.WallJump += OnPlayerWallJump;
         On.Celeste.Player.ClimbJump += OnPlayerClimbJump;
+        On.Celeste.Player.UseRefill += OnPlayerUseRefill;
         On.Celeste.Player.StartDash += OnPlayerStartDash;
         On.Celeste.Player.OnCollideV += OnPlayerCollideV;
 
@@ -61,6 +62,7 @@ public class PeakStaminaModule : EverestModule {
         On.Celeste.Player.Jump -= OnPlayerJump;
         On.Celeste.Player.WallJump -= OnPlayerWallJump;
         On.Celeste.Player.ClimbJump -= OnPlayerClimbJump;
+        On.Celeste.Player.UseRefill -= OnPlayerUseRefill;
         On.Celeste.Player.StartDash -= OnPlayerStartDash;
         On.Celeste.Player.OnCollideV -= OnPlayerCollideV;
 
@@ -249,6 +251,33 @@ public class PeakStaminaModule : EverestModule {
             // 放在 finally 里，保证即使中途抛异常也不会把标记留下来
             tracker?.EndClimbJump();
         }
+    }
+
+    // 玩家吃到恢复水晶（Refill）。
+    //
+    // ★ 为什么需要：冲刺后的 0.25 秒"体力压制"是无差别的，它分不清
+    //   「原版自己偷偷回满」（要压制）和「玩家主动吃水晶恢复」（要允许），
+    //   结果就是"冲刺时吃水晶不回体力"。
+    //   所以在这里把压制窗口取消掉。
+    //
+    // ★ 为什么挂 UseRefill 而不是 RefillStamina：
+    //   RefillStamina() 原版有十几个调用点（Bounce / BoostBegin / DreamDashEnd …），
+    //   那些正是【要压制的内部回满】。而 UseRefill 只有一个调用方
+    //   Refill::OnPlayer，也就是真正碰到水晶。挂它最精确。
+    //
+    // 返回值必须透传：原版靠它判断"这次到底有没有恢复成功"。
+    private static bool OnPlayerUseRefill(On.Celeste.Player.orig_UseRefill orig,
+                                          Player player, bool twoDashes) {
+        bool refilled = orig(player, twoDashes);
+
+        // 只有真的恢复了才取消压制。
+        // UseRefill 在"冲刺次数本来就满、且体力 >= 20"时会返回 false（什么都没做），
+        // 那种情况下不该动压制窗口。
+        if (refilled) {
+            player.Components.Get<StaminaTracker>()?.NotifyRefill();
+        }
+
+        return refilled;
     }
 
     // 玩家冲刺：体力归零时禁止，否则扣 35 点体力。

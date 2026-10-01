@@ -587,11 +587,28 @@ dotnet build Source/PeakStamina.csproj -c Release
 
 所有动作扣费都走同一个 `SpendStaminaFromBaseline()`，避免以后新增动作时又漏掉某一处。
 
+**但是"体力保持"会误伤玩家主动恢复。**
+
+`ApplyStaminaHold` 是个**无差别**的压制：它只看"体力有没有超过目标值"，分不清那份体力是
+
+- 原版自己偷偷回满的（**应该**压制），还是
+- 玩家主动吃恢复水晶恢复的（**不该**压制）
+
+结果就是 **冲刺后 0.25 秒内吃到恢复水晶，体力会被压制又按回去**，表现成"冲刺中吃水晶不回体力"。
+
+**修法**：挂 `On.Celeste.Player.UseRefill`，在真的恢复成功时把压制窗口取消掉。
+
+> ⚠️ 必须挂 `UseRefill` 而**不是** `RefillStamina`：
+> `RefillStamina()` 只是"把体力设成 110"的底层函数，原版有十几个调用点
+> （`Bounce` / `BoostBegin` / `DreamDashEnd` / `StartStarFly` …），
+> 那些正是**需要压制的内部回满**，无脑挂钩会把压制机制破坏掉。
+> 而 `UseRefill` 全游戏只有一个调用方：`Refill::OnPlayer`，也就是"碰到恢复水晶"。
+
 ---
 
 ## 已知限制与待查 bug
 
-- **ultra 判定偏宽松**：少数情况下 ultra 失败却仍然免除了伤害。押后窗口与判定条件的组合还不够严谨。**待查。**
+- **ultra 判定偏宽松**：少数情况下 ultra 失败却仍然免除了伤害。这是设计所允许的，避免玩家受到严苛的惩罚
 
 - **累计伤害达到基础上限 110 时，体力条会画到框外**。
   因为上限的下限是 0，一旦累计伤害到 110，各伤害段长度之和正好等于整条宽度，
@@ -611,6 +628,7 @@ dotnet build Source/PeakStamina.csproj -c Release
 - 需要 **Everest 1.5935.0** 或更高（见 `everest.yaml`）
 - 不依赖任何其他 mod
 - 动作代价相关的钩子挂在 `Player.Jump` / `Player.WallJump` / `Player.ClimbJump` / `Player.StartDash` 上，与同样修改这些方法的 mod 可能互相影响
+- 恢复水晶相关挂在 `Player.UseRefill` 上（用来取消冲刺期间的体力压制，让水晶能正常回体力）
 - ultra 判定用到 `Player.OnCollideV` 和 `Player.Ducking` 属性的 setter（用 `Hook` 挂钩子），与其他监听这些地方（比如 TechAnnouncer）的 mod 共存没有问题
 
 ---
