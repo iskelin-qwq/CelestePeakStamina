@@ -151,6 +151,8 @@ public class PeakStaminaModule : EverestModule {
 
         // body 是 null 表示这次 Die 被忽略了（比如开了无敌，或者玩家已经死了）。
         // 那种情况不算真正死亡，就别重置。
+        //
+        // 不需要在这里检查总开关：ResetMaxStamina() 自己会检查。
         if (body != null) {
             player.Components.Get<StaminaTracker>()?.ResetMaxStamina();
         }
@@ -246,7 +248,12 @@ public class PeakStaminaModule : EverestModule {
 
             // 抹掉原版刚开启的回墙加速窗口。
             // 放在 orig 之后：那时它才被设成 0.2f。
-            player.wallBoostTimer = 0f;
+            //
+            // ★ 必须检查总开关：关掉 mod 时这个技巧要恢复正常，
+            //   否则就成了"mod 关了还在改原版行为"。
+            if (Settings.Enabled) {
+                player.wallBoostTimer = 0f;
+            }
         } finally {
             // 放在 finally 里，保证即使中途抛异常也不会把标记留下来
             tracker?.EndClimbJump();

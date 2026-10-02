@@ -655,6 +655,11 @@ public class StaminaTracker : Component {
             return 0;
         }
 
+        // 总开关关掉时完全不介入（不伤害、不改伤害表）
+        if (!PeakStaminaModule.Settings.Enabled) {
+            return 0;
+        }
+
         // 已经死了就别重复处理（比如同一个事件被多路径触发）
         if (player.Dead) {
             return 0;
@@ -716,6 +721,11 @@ public class StaminaTracker : Component {
             return 0;
         }
 
+        // 总开关关掉时完全不介入（不改伤害表）
+        if (!PeakStaminaModule.Settings.Enabled) {
+            return 0;
+        }
+
         return DamageAccumulator.Heal(PeakStaminaModule.Session.Damages, heal);
     }
 
@@ -745,6 +755,11 @@ public class StaminaTracker : Component {
             return 0;
         }
 
+        // 总开关关掉时完全不介入（不改伤害表）
+        if (!PeakStaminaModule.Settings.Enabled) {
+            return 0;
+        }
+
         int result = DamageAccumulator.Set(PeakStaminaModule.Session.Damages, damage);
 
         ClampPlayerStamina();
@@ -752,13 +767,20 @@ public class StaminaTracker : Component {
     }
 
     // ------------------------------------------------------------------
-    //  ★ 重置上限（TakeDamage 的反操作）
+    //  ★ 重置上限（恢复满值，即清空伤害表）
     // ------------------------------------------------------------------
-    // 三个地方会调用它：
-    //   · 进入一张新地图 / 关卡重试（经 RequestStartLevelReset → ApplyStartLevelReset）
-    //   · 玩家死亡 —— 不让玩家陷入"上限剩 5、连墙都爬不动"的死局
-    //   · ApplyStartLevelReset 里作为重置的一部分
+    // 两个地方会调用它：
+    //   · 关卡开始 / 重试（经 RequestStartLevelReset → ApplyStartLevelReset）
+    //   · 玩家死亡 —— 不让玩家陷入"上限被打残、连墙都爬不动"的死局
+    //
+    // ★ 这个方法会【销毁数据】（把伤害表清空），所以自带总开关检查：
+    //   关掉 mod 时绝不允许它执行 —— 否则就成了"mod 关了还在改数据"。
     public void ResetMaxStamina() {
+        // 总开关关掉时完全不介入
+        if (!PeakStaminaModule.Settings.Enabled) {
+            return;
+        }
+
         // 清空伤害表 —— 因为没有伤害 = 上限就是满值 110。
         // 上限是由伤害表算出来的，所以"重置上限"就是"清空伤害"。
         PeakStaminaModule.Session.Damages.Clear();
@@ -796,6 +818,9 @@ public class StaminaTracker : Component {
         // 打开（默认）：每进一个房间 / 重试一次，上限都补满 110。
         // 关闭        ：上限跨房间保留 —— 摔伤的代价会一直累积，
         //               只有玩家死亡时的那次重置才会把它清掉。
+        //
+        // 不需要在这里检查总开关：ResetMaxStamina() 自己会检查
+        //（它要销毁伤害表，关掉 mod 时必须拒绝执行）。
         if (PeakStaminaModule.Settings.RestoreStaminaCapOnRoomTransition) {
             ResetMaxStamina();
         }
@@ -840,10 +865,14 @@ public class StaminaTracker : Component {
         // ⓪ 总开关：玩家在设置里关掉本 mod 后，立刻停止一切介入
         // ------------------------------------------------------------------
         // 这一关的体力条实体和组件都已经生成好了，没法中途撤销，
-        // 所以改在这里"空转"：不扣体力、不检测摔落，顺便把上限复原，
-        // 免得关掉之后玩家还留着被扣过的上限。
+        // 所以改在这里"空转"：不扣体力、不检测摔落、不动伤害表。
+        //
+        // ★ 这里【不要】再去清伤害表。
+        //   以前关掉 mod 会顺手 Damages.Clear()（把上限恢复满），
+        //   但那是在"销毁数据"——一旦玩家再打开 mod，之前累积的伤害就全没了，
+        //   而且"关掉 mod 还在改数据"本身就违反总开关的语义。
+        //   现在关掉就是纯粹的不介入：伤害表原样保留，上限停在关闭时的值。
         if (!PeakStaminaModule.Settings.Enabled) {
-            PeakStaminaModule.Session.Damages.Clear();
             return;
         }
 
