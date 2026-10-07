@@ -39,4 +39,75 @@ public class PeakStaminaModuleSettings : EverestModuleSettings {
     // SpacedPascalCase 拆成很长的英文标题。
     [SettingName("Restore Stamina Cap on Room Transition")]
     public bool RestoreStaminaCapOnRoomTransition { get; set; } = true;
+
+    // ==================================================================
+    //  各功能的子开关
+    // ==================================================================
+    //  以下开关只在总开关 Enabled 打开时才有意义。
+    //  总开关一关，这些全部失效（本 mod 完全不介入）。
+    //
+    //  ★ 每个子开关都【不】影响其他功能。例如关掉"摔落伤害"后，
+    //    摔落依然会重置参考高度，只是不结算伤害。
+    // ==================================================================
+
+    // ------------------------------------------------------------------
+    //  1. 摔落伤害
+    // ------------------------------------------------------------------
+    // 关掉后从高处掉落不再扣体力上限（也不再有 ultra 豁免的押后结算）。
+    [SettingName("Enable Fall Damage")]
+    public bool EnableFallDamage { get; set; } = true;
+
+    // ------------------------------------------------------------------
+    //  2. 饥饿伤害
+    // ------------------------------------------------------------------
+    // 关掉后不再按时间扣上限。
+    //
+    // ★ 关掉的瞬间会把饥饿计时器【重置】—— 这是刻意的：
+    //   玩家关掉饥饿通常是想"暂停这个机制"，那么"这一轮攒了多久"
+    //   就不该被保留。重新打开时从零开始重新计满一分钟。
+    //   （重置动作在 setter 里做，见下面 EnableHungerDamage 的实现。）
+    private bool enableHungerDamage = true;
+
+    [SettingName("Enable Hunger Damage")]
+    public bool EnableHungerDamage {
+        get => enableHungerDamage;
+        set {
+            // 从"开"变成"关"的那一刻 → 让所有玩家身上的饥饿计时归零
+            if (enableHungerDamage && !value) {
+                PeakStaminaModule.ResetHungerTimers();
+            }
+
+            enableHungerDamage = value;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    //  3. 动作代价
+    // ------------------------------------------------------------------
+    // 关掉后跳跃 / 墙跳 / 冲刺都不再消耗当前体力。
+    // 注意：爬墙跳消耗的 27.5 体力是【原版行为】，不受这个开关影响。
+    // 关掉后也不会再触发"体力归零惩罚"（因为没人扣体力了）。
+    [SettingName("Enable Action Stamina Costs")]
+    public bool EnableActionCosts { get; set; } = true;
+
+    // ------------------------------------------------------------------
+    //  4. 禁用偷体力跳（wall boost）
+    // ------------------------------------------------------------------
+    // 打开（默认）：爬墙跳后朝墙推【不会】返还那 27.5 体力。
+    // 关闭        ：恢复原版技巧，爬墙跳可以偷体力。
+    //
+    // 之所以写成"禁用XX"而不是"允许XX"，是为了让默认值 true
+    // 对应"本 mod 的特色行为"，和文档里的描述一致。
+    [SettingName("Disable Wall Boost (Stamina Steal)")]
+    public bool DisableWallBoost { get; set; } = true;
+
+    // ------------------------------------------------------------------
+    //  5. 体力归零惩罚
+    // ------------------------------------------------------------------
+    // 打开（默认）：体力归零时冲刺次数也清成 0（空中无法再冲刺）。
+    // 关闭        ：体力归零不再影响冲刺次数。
+    //
+    // 注意"体力为 0 时禁止冲刺"这条（StartDash 的闸门）也归这个开关管。
+    [SettingName("Enable Zero Stamina Penalty")]
+    public bool EnableZeroStaminaPenalty { get; set; } = true;
 }

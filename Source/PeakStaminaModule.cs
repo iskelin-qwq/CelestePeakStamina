@@ -21,6 +21,30 @@ public class PeakStaminaModule : EverestModule {
     public override Type SaveDataType => typeof(PeakStaminaModuleSaveData);
     public static PeakStaminaModuleSaveData SaveData => (PeakStaminaModuleSaveData) Instance._SaveData;
 
+    // ------------------------------------------------------------------
+    //  把场上所有玩家的饥饿计时器归零
+    // ------------------------------------------------------------------
+    // 由 PeakStaminaModuleSettings.EnableHungerDamage 的 setter 调用
+    // —— 也就是玩家在设置里把"饥饿伤害"关掉的那一刻。
+    //
+    // 为什么要绕一圈回到这里来做？
+    //   设置类拿不到玩家列表，而计时器在 Player 身上的 StaminaTracker 里。
+    //   所以由设置类发一个信号，模块负责转达给所有玩家。
+    //
+    // 做成静态方法是为了能在 setter 里直接调用（那时没有模块实例引用也没关系）。
+    public static void ResetHungerTimers() {
+        Level level = Engine.Scene as Level;
+        if (level == null) {
+            return;
+        }
+
+        // 一关通常只有一个玩家，但用 Tracker 遍历更稳妥
+        //（也顺带覆盖了"组件还没挂上"的情况 —— Get 会返回 null，被 ?. 吃掉）
+        foreach (Player player in level.Tracker.GetEntities<Player>()) {
+            player.Components.Get<StaminaTracker>()?.ResetHungerTimer();
+        }
+    }
+
     public PeakStaminaModule() {
         Instance = this;
 
@@ -120,10 +144,17 @@ public class PeakStaminaModule : EverestModule {
         player.Components.Get<StaminaTracker>()?.RequestStartLevelReset();
     }
 
-    // 关卡重试（按 R 自杀、掉坑复活、死亡后 Retry）走的是 Level.Reload()，
-    // 【不会】再走一次 Level.LoadLevel。
-    // 所以只挂 LoadLevel 是不够的 —— 那样"重试之后上限没还原"就是这个原因。
+    // 关卡重试 / 掉坑复活 / 死亡后 Retry 都会【重新加载关卡】，
+    // 也就是走 Level.LoadLevel —— 上面那个钩子已经覆盖到了。
+    //
+    // 而 Level.Reload 是另一条路径：Cecil 扫描确认它【全游戏只有一个调用方】
+    // —— PlayerDeadBody::End，也就是"死亡动画播完、真正结束这一条命"的时刻。
+    // 它不重新加载关卡，所以只挂 LoadLevel 会漏掉"死亡那一刻"的重置。
     // 这里补上 Reload 的钩子，让两条路径都能重置。
+    //
+    // ★ 注意：Reload 不会重建体力条实体（它是关卡里的实体，不随 Reload 重建），
+    //   而 StaminaTracker 挂在 Player 身上、本来就会跨重试保留，
+    //   所以我们能在这个已有实例上直接打标记。
     private static void OnLevelReload(On.Celeste.Level.orig_Reload orig, Level level) {
         orig(level);
 
@@ -132,9 +163,6 @@ public class PeakStaminaModule : EverestModule {
             return;
         }
 
-        // StaminaBarEntity 是关卡里的实体，重试时会跟着重建，
-        // 但 StaminaTracker 挂在 Player 身上、会跨重试保留下来，
-        // 所以我们能在这个已有实例上直接打标记。
         player.Components.Get<StaminaTracker>()?.RequestStartLevelReset();
     }
 
@@ -249,9 +277,11 @@ public class PeakStaminaModule : EverestModule {
             // 抹掉原版刚开启的回墙加速窗口。
             // 放在 orig 之后：那时它才被设成 0.2f。
             //
-            // ★ 必须检查总开关：关掉 mod 时这个技巧要恢复正常，
-            //   否则就成了"mod 关了还在改原版行为"。
-            if (Settings.Enabled) {
+            // ★ 两个条件缺一不可：
+            //   Enabled          —— 总开关关掉时完全不介入
+            //   DisableWallBoost —— "禁用偷体力跳"的子开关，
+            //                       关掉它就恢复原版技巧
+            if (Settings.Enabled && Settings.DisableWallBoost) {
                 player.wallBoostTimer = 0f;
             }
         } finally {

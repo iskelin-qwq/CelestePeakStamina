@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using Monocle;
 
 namespace Celeste.Mod.PeakStamina;
@@ -5,10 +6,15 @@ namespace Celeste.Mod.PeakStamina;
 // ============================================================================
 //  体力上限管理器（挂在 Player 自己身上的组件）
 //
-//  它干三件事：
+//  它的职责（早就不止三件事了）：
 //    ① 保存"当前体力上限"（持久化在 PeakStaminaModuleSession，切关卡重置）
 //    ② 每帧盯住玩家是不是在空中往下掉，落地时算一次摔落伤害
 //    ③ 保证玩家的真实体力永远不超过上限
+//    ④ 动作代价（跳跃 / 墙跳 / 冲刺扣体力）
+//    ⑤ 饥饿计时
+//    ⑥ ultra 判定（决定斜下冲刺落地的那次伤害是否豁免）
+//    ⑦ 体力归零的惩罚
+//    ⑧ 封禁偷体力跳（清掉原版的回墙加速窗口）
 //
 //  为什么挂在 Player 上而不是那个绿条实体上？
 //    因为绿条实体的 Update 每帧跑在很后面（它是在 LoadLevel 钩子里才被加进关卡的），
@@ -104,8 +110,8 @@ public class StaminaTracker : Component {
     // 摔落高度 = 这个值 - 落地时的 Y。它按下面三条规则被"重置"：
     //
     //    1. 起跳时（OnPlayerJump 被 Jump 钩子调用）
-    //    2. 抓住墙壁后（刚进入攀爬状态的那一帧）
-    //    3. 冲刺时（刚进入冲刺状态的那一帧）
+    //    2. 攀爬期间【每一帧】都重置（不是只在刚抓住墙那一帧）
+    //    3. 刚开始空中冲刺时（刚进入冲刺状态的那一帧，任何方向都算）
     //
     // 除此之外它保持不变 —— 所以玩家跳起来再落回原高度，摔落高度是 0，
     // 不会因为"最高点"而白白扣血。
@@ -277,6 +283,21 @@ public class StaminaTracker : Component {
             return;
         }
 
+        // 子开关：动作代价关掉时完全不扣体力。
+        // 注意要在这里（而不是各个调用点）拦截 —— 这是所有动作扣费的统一入口，
+        // 放在这里能保证跳跃 / 墙跳 / 冲刺一处都不会漏。
+        //
+        // ★ 这个开关只关掉【本 mod 额外加的】扣费。
+        //   原版自己会消耗体力的行为（爬墙 / 抓墙的持续消耗、爬墙跳的 -27.5）
+        //   不受影响，我们也没去改它们。
+        //
+        //   ★ 所以关掉这个开关后，玩家贴墙爬一会儿【照样会把体力用到 0】，
+        //     "体力归零惩罚"（EnableZeroStaminaPenalty）依然会触发 ——
+        //     那两个是完全独立的开关，别把它们当成一个。
+        if (!PeakStaminaModule.Settings.EnableActionCosts) {
+            return;
+        }
+
         float baseline = Calc.Min(staminaAtFrameStart, MaxStamina);
         float target = Calc.Max(baseline - amount, 0f);
 
@@ -287,8 +308,9 @@ public class StaminaTracker : Component {
         // ------------------------------------------------------------------
         BeginStaminaHold(target);
 
-        // 扣完之后立刻检查有没有见底（体力归零的惩罚）
-        ApplyZeroStaminaPenalty();
+        // 注意：这里【不】再调用 ApplyZeroStaminaPenalty()。
+        // 归零惩罚已经改成在 Update 里每帧独立检查（见那里的说明），
+        // 这样它就不会依附于"动作扣费"这条路径。
     }
 
     // ------------------------------------------------------------------
@@ -351,13 +373,14 @@ public class StaminaTracker : Component {
     // ==================================================================
     //  ★ ultra 判定
     // ==================================================================
-    // 判定逻辑完全复刻 TechAnnouncer 里 Player_Jump 的做法：
+    // 判定逻辑复刻 TechAnnouncer 里 Player_Jump 的做法，
+    // 但【速度门槛刻意放宽了】——见 UltraSpeedSquared 的说明。
     //
     //   ① NotifyCollideV        —— 撞到垂直实体（通常是地面）时记一帧
     //   ② NotifyDuckingOnGround —— 贴着地面时按下蹲键（ultra 的前置动作）
     //   ③ IsUltraJump           —— 起跳那一刻检查：
     //                                处于普通状态(State == 0)
-    //                                且速度平方 > 240²
+    //                                且速度平方 > UltraSpeedSquared（40000 = 200²）
     //
     // 三者全部满足才算做出 ultra。
 
@@ -490,6 +513,12 @@ public class StaminaTracker : Component {
             return true;
         }
 
+        // 子开关：归零惩罚关掉时，这条门槛也一起放开
+        //（它同样是"体力归零的惩罚"之一）
+        if (!PeakStaminaModule.Settings.EnableZeroStaminaPenalty) {
+            return true;
+        }
+
         return player.Stamina > 0f;
     }
 
@@ -507,6 +536,12 @@ public class StaminaTracker : Component {
     public bool CanDash() {
         // mod 被关掉时不介入，永远放行
         if (!PeakStaminaModule.Settings.Enabled) {
+            return true;
+        }
+
+        // 子开关：归零惩罚关掉时，"体力为 0 禁止冲刺"这条也一起放开
+        //（它和"冲刺次数清零"是同一个惩罚的两个部分）
+        if (!PeakStaminaModule.Settings.EnableZeroStaminaPenalty) {
             return true;
         }
 
@@ -545,6 +580,11 @@ public class StaminaTracker : Component {
             return;
         }
 
+        // 子开关：动作代价关掉时，冲刺也不扣体力。
+        if (!PeakStaminaModule.Settings.EnableActionCosts) {
+            return;
+        }
+
         // 和其他动作一样：从"上一帧收口后的干净体力"上扣，
         // 不能直接读 player.Stamina（冲刺键处理时它可能刚被原版回满）。
         float baseline = Calc.Min(staminaAtFrameStart, MaxStamina);
@@ -559,20 +599,35 @@ public class StaminaTracker : Component {
         // 所以要靠"保持"来挡住 —— 这也是最初修这个 bug 的原因。
         BeginStaminaHold(target);
 
-        // 顺手处理"扣完见底"的惩罚（冲刺次数归零）
-        ApplyZeroStaminaPenalty();
+        // 注意：这里【不】再调用 ApplyZeroStaminaPenalty()。
+        // 归零惩罚已经改成在 Update 里每帧独立检查（见那里的说明）。
     }
 
     // ------------------------------------------------------------------
     //  ★ 体力归零 → 冲刺次数归零
     // ------------------------------------------------------------------
-    // 放在 SpendStaminaFromBaseline / OnPlayerDashAction 里统一调用，
-    // 所以【所有】让体力见底的动作都会触发，不用在每处单独写。
+    // ★ 由 Update 每帧调用（不是由动作扣费调用）。
+    //
+    //   为什么改成每帧检查？
+    //     以前它是在 SpendStaminaFromBaseline / OnPlayerDashAction 末尾调用的，
+    //     但那两个方法的开头都有 `if (!EnableActionCosts) return;` ——
+    //     结果就是【关掉动作代价后，这条惩罚永远不会执行】，
+    //     而同一开关下的"禁冲刺 / 禁中性跳"却仍然生效，
+    //     三部分行为不一致，也没法向使用者解释。
+    //
+    //     改成在 Update 里独立检查后，它只受 EnableZeroStaminaPenalty 控制，
+    //     不再依附任何动作路径 —— 不管是本 mod 扣的还是原版爬墙扣的，
+    //     只要体力见底就会触发。
     //
     // 注意：原版 Celeste 里，玩家只要【站在地面上】冲刺次数就会被自动补满，
     //   所以这条规则实际只在【空中】体力耗尽时看得出效果。
     //   这是原版机制，我们没有去改它。
     private void ApplyZeroStaminaPenalty() {
+        // 子开关：归零惩罚关掉时，体力归零不再清冲刺次数
+        if (!PeakStaminaModule.Settings.EnableZeroStaminaPenalty) {
+            return;
+        }
+
         if (player.Stamina > 0f) {
             return;
         }
@@ -595,7 +650,25 @@ public class StaminaTracker : Component {
     // 用 Engine.DeltaTime 计时，所以游戏暂停 / 过场冻结时不会饿 ——
     // 它计的是"玩家真正在玩的时间"。
 
+    // 把饥饿计时器归零（重新计满一整个 HungerInterval）。
+    //
+    // 由 PeakStaminaModule.ResetHungerTimers() 调用 —— 触发时机是
+    // 玩家在设置里【关掉"饥饿伤害"】的那一刻。
+    public void ResetHungerTimer() {
+        hungerTimer = HungerInterval;
+    }
+
     private void UpdateHunger() {
+        // 子开关：饥饿关掉时不扣上限。
+        //
+        // ★ 注意这里的"暂停"是就【每帧递减】而言的。
+        //   玩家把开关关掉的那一刻，计时器已经被 ResetHungerTimer() 重置过了
+        //   （由设置项的 setter 触发），所以重新打开时会从零开始重新计满一分钟，
+        //   而不是接着之前攒的进度。
+        if (!PeakStaminaModule.Settings.EnableHungerDamage) {
+            return;
+        }
+
         // 已经死了就别再饿（死亡流程期间不该继续扣上限）
         if (player.Dead) {
             return;
@@ -647,8 +720,8 @@ public class StaminaTracker : Component {
     //     上限 75，受 75 点 → 新上限 0      → 死
     //     上限 75，受 90 点 → 新上限 -15    → 死
     //
-    //   因为只有"伤害 < 上限"才会活下来，所以存活时上限最小是 1，
-    //   永远不可能是 0 —— 画体力条时不会遇到 0 或负数。
+    //   因为只有"伤害总和 < 上限"才会活下来，所以【经 TakeDamage 时】
+    //   存活的上限最小是 1，永远不可能是 0。
     public int TakeDamage(Damage damage) {
         // 防御：空引用或非正数值直接忽略，避免"负伤害"反而加回上限
         if (damage == null || damage.Number <= 0) {
@@ -665,27 +738,12 @@ public class StaminaTracker : Component {
             return 0;
         }
 
-        // 注意：上限必须是"这次伤害生效之前"的值。
-        // DamageAccumulator.Apply 会立刻改动伤害表，所以要先取。
-        float before = MaxStamina;
+        // 致死判定（见 KillIfCapReachesFloor 的说明）。
+        // 用"伤害总和"比较，全程整数，没有精度问题。
+        int totalAfter = DamageAccumulator.Total(PeakStaminaModule.Session.Damages) + damage.Number;
 
-        // ------------------------------------------------------------------
-        //  致死判定
-        // ------------------------------------------------------------------
-        // 必须精确用 float 比较，不要用 (int)before：
-        // 因为 damage.Number 是 int，如果写成 (int)before，那么
-        // 60.9 会被截断成 60，导致边界情况被误判。
-        if (damage.Number >= before - StaminaCapFloor) {
-            float wouldBe = before - damage.Number;
-
-            Logger.Log(LogLevel.Info, "PeakStamina",
-                $"受到 {damage.DamageType} 伤害 {damage.Number} 点，" +
-                $"上限将从 {before} 掉到 {wouldBe}（下限 {StaminaCapFloor}）→ 判定死亡");
-
-            // 让玩家以摔落方向死亡。
-            // player.Speed 是当前速度，作为下落方向传给 Die —— 和原版摔死一致，
-            // 角色会朝那个方向弹飞出去。
-            player.Die(player.Speed);
+        if (KillIfCapReachesFloor(totalAfter,
+                $"受到 {damage.DamageType} 伤害 {damage.Number} 点")) {
             return 0;
         }
 
@@ -697,6 +755,44 @@ public class StaminaTracker : Component {
         ClampPlayerStamina();
 
         return accumulated;
+    }
+
+    // ------------------------------------------------------------------
+    //  ★ 致死判定的共用实现
+    // ------------------------------------------------------------------
+    // 规则：如果这次伤害会让上限掉到【下限】或以下 → 死亡。
+    // 下限 StaminaCapFloor 取 0，而 上限 = BaseMaxStamina − 伤害总和，
+    // 所以规则等价于：
+    //
+    //       伤害总和 >= BaseMaxStamina  →  死亡
+    //
+    // ★★ 为什么用"伤害总和"而不是"上限差值"来比较？★★
+    //   因为伤害总和是【整数】，比较完全精确，不会有边界上的意外。
+    //
+    //   如果改写成"上限掉了多少"来判断，就需要在 float 上做减法，
+    //   而 float 的相等比较是不可靠的（110 − 109 未必精确等于 1）。
+    //   致死判定是"一刀切"的规则，用整数比较能保证边界永远不会判错。
+    //
+    // 参数 damageTotalAfter：这次操作【生效之后】所有伤害的总和
+    // 参数 label           ：只用于日志
+    //
+    // 返回 true 表示已经判定死亡（调用方应当直接返回，不要再改伤害表）。
+    private bool KillIfCapReachesFloor(int damageTotalAfter, string label) {
+        if (damageTotalAfter < BaseMaxStamina - StaminaCapFloor) {
+            return false;
+        }
+
+        float capAfter = Calc.Max(BaseMaxStamina - damageTotalAfter, StaminaCapFloor);
+
+        Logger.Log(LogLevel.Info, "PeakStamina",
+            $"{label}，伤害总和 {damageTotalAfter}，" +
+            $"上限将掉到 {capAfter}（下限 {StaminaCapFloor}）→ 判定死亡");
+
+        // 让玩家以当前速度方向死亡。
+        // player.Speed 作为下落方向传给 Die —— 和原版摔死一致，
+        // 角色会朝那个方向弹飞出去。
+        player.Die(player.Speed);
+        return true;
     }
 
     // ------------------------------------------------------------------
@@ -750,6 +846,11 @@ public class StaminaTracker : Component {
     //
     // ★ 上限变化后会把玩家当前体力一起压到上限以下（和 TakeDamage 一致），
     //   否则把伤害设大之后，玩家手里还攥着超过上限的体力。
+    //
+    // ★ 也会做【致死判定】（和 TakeDamage 一致）：
+    //   因为这是"权威设置"，理论上可以直接把伤害设到 150（上限 0），
+    //   如果不判死，就会出现"上限 0 但玩家还活着"的状态，
+    //   体力条也会画到框外。所以这里和 TakeDamage 走同一个判定。
     public int SetDamage(Damage damage) {
         if (damage == null) {
             return 0;
@@ -760,7 +861,48 @@ public class StaminaTracker : Component {
             return 0;
         }
 
-        int result = DamageAccumulator.Set(PeakStaminaModule.Session.Damages, damage);
+        // 已经死了就别重复处理
+        if (player.Dead) {
+            return 0;
+        }
+
+        // ------------------------------------------------------------------
+        // 致死判定必须【在改动伤害表之前】做
+        // ------------------------------------------------------------------
+        // 先算出"这次设置之后，所有伤害的总和"。
+        // 如果在 Set 之后再算，Session 已经被改过了，就拿不到干净的数据。
+        //
+        // 算法：把该类型当前的数值从总和里换成新值（正数用新值，<= 0 视为移除该条目）。
+        List<Damage> damages = PeakStaminaModule.Session.Damages;
+
+        int totalAfter = 0;
+        bool replaced = false;
+
+        foreach (Damage existing in damages) {
+            if (existing == null) {
+                continue;
+            }
+
+            if (existing.DamageType == damage.DamageType) {
+                // 这个类型要被替换：新值 <= 0 表示移除（贡献 0），否则贡献新值
+                totalAfter += damage.Number > 0 ? damage.Number : 0;
+                replaced = true;
+            } else {
+                totalAfter += existing.Number;
+            }
+        }
+
+        // 表里原本没有这个类型：只有正数才会追加
+        if (!replaced && damage.Number > 0) {
+            totalAfter += damage.Number;
+        }
+
+        if (KillIfCapReachesFloor(totalAfter,
+                $"[SetDamage] 将 {damage.DamageType} 设为 {damage.Number}")) {
+            return 0;
+        }
+
+        int result = DamageAccumulator.Set(damages, damage);
 
         ClampPlayerStamina();
         return result;
@@ -903,6 +1045,17 @@ public class StaminaTracker : Component {
         ApplyStaminaHold();
 
         // ------------------------------------------------------------------
+        // ★ 体力归零的惩罚：每帧独立检查
+        // ------------------------------------------------------------------
+        // 放在体力收口之后 —— 此时 player.Stamina 这一帧不会再变了，
+        // 判断"是否见底"才准确。
+        //
+        // 每帧检查（而不是挂在动作扣费里）的理由见 ApplyZeroStaminaPenalty 的说明：
+        // 这样它就不会因为"动作代价被关掉"而连带失效，
+        // 原版爬墙把体力耗光时也同样能触发。
+        ApplyZeroStaminaPenalty();
+
+        // ------------------------------------------------------------------
         // ★ 记录这一帧"干净"的体力值，供下一次动作扣费当基准
         // ------------------------------------------------------------------
         // 此时玩家自己的 Update 已经跑完、ClampPlayerStamina 也已经执行，
@@ -1013,6 +1166,14 @@ public class StaminaTracker : Component {
     //  内部：落地结算
     // ------------------------------------------------------------------
     private void ResolveFallDamage() {
+        // 子开关：摔落伤害关掉时完全不结算。
+        // 注意这里只是不【结算】，起跳高度的追踪照常进行 ——
+        // 这样玩家中途打开开关时，参考高度是有效的，不会因为
+        // "一直没记录"而算出一次巨大的假摔落。
+        if (!PeakStaminaModule.Settings.EnableFallDamage) {
+            return;
+        }
+
         // 宽限期内不算摔落。出生下落、出场动画都会落在这里。
         if (graceTimer > 0f) {
             return;
