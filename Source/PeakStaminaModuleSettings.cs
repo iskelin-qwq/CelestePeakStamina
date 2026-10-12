@@ -48,13 +48,33 @@ public class PeakStaminaModuleSettings : EverestModuleSettings {
     //
     //  ★ 每个子开关都【不】影响其他功能。例如关掉"摔落伤害"后，
     //    摔落依然会重置参考高度，只是不结算伤害。
+    //
+    //  ★★ 它们在菜单里被收进「详细设置」子菜单，但【存储格式仍然是扁平的】★★
+    //
+    //    为什么要绕这一圈？——为了保护玩家已有的设置不丢失。
+    //
+    //    YamlDotNet 序列化嵌套对象时会写成：
+    //        Detail:
+    //          EnableFallDamage: true
+    //    而本 mod 之前的存档是扁平的：
+    //        EnableFallDamage: true
+    //    直接改成嵌套的话，老存档里的值会全部读不回来（等于把玩家的设置清空）。
+    //
+    //    所以这里用两层结构：
+    //      · 本类里这 5 个属性 —— 【负责存储】，名字和原来一模一样，
+    //        于是 YAML 结构完全不变。它们被 [SettingIgnore] 从菜单里隐藏。
+    //      · 下面 DetailSettings 类里的同名转发属性 —— 【负责菜单显示】，
+    //        读写都转发到上面那几个属性上。
+    //
+    //    Everest 只会在【生成菜单】时检查 [SettingIgnore]，
+    //    序列化时完全不看它 —— 这才让上面这个做法成立。
     // ==================================================================
 
     // ------------------------------------------------------------------
     //  1. 摔落伤害
     // ------------------------------------------------------------------
     // 关掉后从高处掉落不再扣体力上限（也不再有 ultra 豁免的押后结算）。
-    [SettingName("Enable Fall Damage")]
+    [SettingIgnore]
     public bool EnableFallDamage { get; set; } = true;
 
     // ------------------------------------------------------------------
@@ -65,29 +85,19 @@ public class PeakStaminaModuleSettings : EverestModuleSettings {
     // ★ 关掉的瞬间会把饥饿计时器【重置】—— 这是刻意的：
     //   玩家关掉饥饿通常是想"暂停这个机制"，那么"这一轮攒了多久"
     //   就不该被保留。重新打开时从零开始重新计满一分钟。
-    //   （重置动作在 setter 里做，见下面 EnableHungerDamage 的实现。）
-    private bool enableHungerDamage = true;
-
-    [SettingName("Enable Hunger Damage")]
-    public bool EnableHungerDamage {
-        get => enableHungerDamage;
-        set {
-            // 从"开"变成"关"的那一刻 → 让所有玩家身上的饥饿计时归零
-            if (enableHungerDamage && !value) {
-                PeakStaminaModule.ResetHungerTimers();
-            }
-
-            enableHungerDamage = value;
-        }
-    }
+    //   （重置动作在 setter 里做，见下面 DetailSettings 的实现。）
+    [SettingIgnore]
+    public bool EnableHungerDamage { get; set; } = true;
 
     // ------------------------------------------------------------------
     //  3. 动作代价
     // ------------------------------------------------------------------
     // 关掉后跳跃 / 墙跳 / 冲刺都不再消耗当前体力。
     // 注意：爬墙跳消耗的 27.5 体力是【原版行为】，不受这个开关影响。
-    // 关掉后也不会再触发"体力归零惩罚"（因为没人扣体力了）。
-    [SettingName("Enable Action Stamina Costs")]
+    //
+    // 另外注意：归零惩罚现在是【每帧独立检查】的，
+    // 所以关掉这个开关【不会】连带禁用"清空冲刺次数"。
+    [SettingIgnore]
     public bool EnableActionCosts { get; set; } = true;
 
     // ------------------------------------------------------------------
@@ -98,7 +108,7 @@ public class PeakStaminaModuleSettings : EverestModuleSettings {
     //
     // 之所以写成"禁用XX"而不是"允许XX"，是为了让默认值 true
     // 对应"本 mod 的特色行为"，和文档里的描述一致。
-    [SettingName("Disable Wall Boost (Stamina Steal)")]
+    [SettingIgnore]
     public bool DisableWallBoost { get; set; } = true;
 
     // ------------------------------------------------------------------
@@ -107,7 +117,86 @@ public class PeakStaminaModuleSettings : EverestModuleSettings {
     // 打开（默认）：体力归零时冲刺次数也清成 0（空中无法再冲刺）。
     // 关闭        ：体力归零不再影响冲刺次数。
     //
-    // 注意"体力为 0 时禁止冲刺"这条（StartDash 的闸门）也归这个开关管。
-    [SettingName("Enable Zero Stamina Penalty")]
+    // 注意"体力为 0 时禁止冲刺"和"禁止中性跳"这两条门槛也归这个开关管。
+    [SettingIgnore]
     public bool EnableZeroStaminaPenalty { get; set; } = true;
+
+    // ==================================================================
+    //  「详细设置」子菜单
+    // ==================================================================
+    //  ★ [SettingSubMenu] 标在【嵌套类】上，不是标在属性上！
+    //    Everest 的判断逻辑是"属性的【类型】有没有这个特性"，
+    //    标在属性上会得到编译错误 CS0592。
+    //
+    //  标好之后 Everest 会：
+    //    1. 自动 new 一个 DetailSettings 实例（用 Activator.CreateInstance）
+    //    2. 在菜单里建一个可展开的子菜单
+    //    3. 遍历这个类的属性，逐个生成菜单项
+    //
+    //  DetailSettings 里的属性【只负责显示】，get/set 都转发到上面那 5 个
+    //  存储属性。所以 YAML 里保存的仍然是上面那些扁平名字，存档结构完全不变。
+    [SettingName("详细设置")]
+    public DetailSettings Detail { get; set; } = new DetailSettings();
+
+    [SettingSubMenu]
+    public class DetailSettings : EverestModuleSettings {
+        // ------------------------------------------------------------------
+        //  转发目标
+        // ------------------------------------------------------------------
+        // 为什么直接用静态的 PeakStaminaModule.Settings，而不是在构造时
+        // 存一个"外层实例"引用？
+        //
+        //   因为 Everest 造这个类的实例时用的是 Activator.CreateInstance，
+        //   只会调无参构造，我们没法在那里拿到外层实例；而且它加载存档、
+        //   重建菜单时还会再造新实例，存下来的引用会失效。
+        //
+        //   PeakStaminaModule.Settings 始终指向"当前那份生效的设置"，
+        //   而菜单构建、玩家点开关这些时机它一定有值 —— 所以直接用它最稳，
+        //   既不用维护引用，也不用在 Load/Save 时重新接线。
+        //
+        // 兜底：万一静态引用还没建立（理论上不该发生），get 返回 true、
+        //       set 直接忽略，至少不会抛异常。
+        private static PeakStaminaModuleSettings S => PeakStaminaModule.Settings;
+
+        [SettingName("Enable Fall Damage")]
+        public bool EnableFallDamage {
+            get => S?.EnableFallDamage ?? true;
+            set { if (S != null) { S.EnableFallDamage = value; } }
+        }
+
+        [SettingName("Enable Hunger Damage")]
+        public bool EnableHungerDamage {
+            get => S?.EnableHungerDamage ?? true;
+            set {
+                if (S == null) {
+                    return;
+                }
+
+                // 从"开"变成"关"的那一刻 → 让所有玩家身上的饥饿计时归零
+                if (S.EnableHungerDamage && !value) {
+                    PeakStaminaModule.ResetHungerTimers();
+                }
+
+                S.EnableHungerDamage = value;
+            }
+        }
+
+        [SettingName("Enable Action Stamina Costs")]
+        public bool EnableActionCosts {
+            get => S?.EnableActionCosts ?? true;
+            set { if (S != null) { S.EnableActionCosts = value; } }
+        }
+
+        [SettingName("Disable Wall Boost (Stamina Steal)")]
+        public bool DisableWallBoost {
+            get => S?.DisableWallBoost ?? true;
+            set { if (S != null) { S.DisableWallBoost = value; } }
+        }
+
+        [SettingName("Enable Zero Stamina Penalty")]
+        public bool EnableZeroStaminaPenalty {
+            get => S?.EnableZeroStaminaPenalty ?? true;
+            set { if (S != null) { S.EnableZeroStaminaPenalty = value; } }
+        }
+    }
 }

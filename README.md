@@ -564,7 +564,29 @@ private static readonly Color OutlineColor   = new Color(0xF2, 0xF2, 0xF2);  // 
 
 ---
 
-#### 3. Enable Fall Damage（摔落伤害）
+#### 3. 详细设置（子菜单）
+
+下面这 5 个功能开关**收在一个可展开的子菜单里**，菜单路径：
+
+```
+模组选项 → PeakStamina → 详细设置 ▸
+                          ├ Enable Fall Damage
+                          ├ Enable Hunger Damage
+                          ├ Enable Action Stamina Costs
+                          ├ Disable Wall Boost (Stamina Steal)
+                          └ Enable Zero Stamina Penalty
+```
+
+选中「详细设置」按确认键即可展开 / 收起。
+
+> 📌 **存档格式没有变化**：这 5 个开关在存档里仍然是**扁平**的
+> （`EnableFallDamage: true` 这样），和加入子菜单之前完全一样，
+> 所以你原有的设置**不会丢失**。子菜单只是显示层的分组。
+>
+> 实现方式：真正存值的属性留着并标 `[SettingIgnore]`（只从菜单隐藏、不影响序列化），
+> 再由嵌套的 `DetailSettings` 类转发读写过去。
+
+#### 4. Enable Fall Damage（摔落伤害）
 
 默认**开**。
 
@@ -576,7 +598,7 @@ private static readonly Color OutlineColor   = new Color(0xF2, 0xF2, 0xF2);  // 
 > 关掉它只是不**结算**，起跳高度的追踪照常进行——这样你中途打开开关时，
 > 参考高度是有效的，不会因为"一直没记录"而算出一次巨大的假摔落。
 
-#### 4. Enable Hunger Damage（饥饿伤害）
+#### 5. Enable Hunger Damage（饥饿伤害）
 
 默认**开**。
 
@@ -590,7 +612,7 @@ private static readonly Color OutlineColor   = new Color(0xF2, 0xF2, 0xF2);  // 
 > 这是刻意的——你关掉饥饿通常就是想暂时摆脱它，那么"这一轮已经攒了多久"
 > 就不该被保留下来。
 
-#### 5. Enable Action Stamina Costs（动作代价）
+#### 6. Enable Action Stamina Costs（动作代价）
 
 默认**开**。
 
@@ -610,7 +632,7 @@ private static readonly Color OutlineColor   = new Color(0xF2, 0xF2, 0xF2);  // 
 > ⚠️ 所以关掉它之后，**体力仍然会归零**——玩家贴墙爬一会儿就见底了。
 > 因此"**体力归零惩罚**"（第 7 项）**照样会触发**，它是独立开关。
 
-#### 6. Disable Wall Boost (Stamina Steal)（禁用偷体力跳）
+#### 7. Disable Wall Boost (Stamina Steal)（禁用偷体力跳）
 
 默认**开**。
 
@@ -622,7 +644,7 @@ private static readonly Color OutlineColor   = new Color(0xF2, 0xF2, 0xF2);  // 
 > 💡 名字写成"禁用XX"而不是"允许XX"，所以默认值 `true` 对应的就是
 > **本 mod 封禁偷体力跳**这个行为。想体验原版技巧就把它关掉。
 
-#### 7. Enable Zero Stamina Penalty（体力归零惩罚）
+#### 8. Enable Zero Stamina Penalty（体力归零惩罚）
 
 默认**开**。
 
