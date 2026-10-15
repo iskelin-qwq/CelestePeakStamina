@@ -1,6 +1,8 @@
 using System;
+using System.Reflection;
 using Microsoft.Xna.Framework;
 using Monocle;
+using MonoMod.Cil;
 using MonoMod.RuntimeDetour;
 
 namespace Celeste.Mod.PeakStamina;
@@ -11,6 +13,10 @@ public class PeakStaminaModule : EverestModule {
     // 挂钩 Player.Ducking 属性的 setter 用的对象。
     // Ducking 是属性而不是方法，没有 On.Celeste 事件可挂，只能用 Hook。
     private Hook duckingHook;
+
+    // 挂钩 Player.orig_Update 里"wall boost 加体力"那一行的 IL 钩子。
+    // 用来区分"技巧溢出"（放行）和"落地回满"（钳制）。
+    private ILHook wallBoostOverflowHook;
 
     public override Type SettingsType => typeof(PeakStaminaModuleSettings);
     public static PeakStaminaModuleSettings Settings => (PeakStaminaModuleSettings) Instance._Settings;
@@ -76,9 +82,32 @@ public class PeakStaminaModule : EverestModule {
             new Action<Action<Player, bool>, Player, bool>(OnPlayerDuckingSet)
         );
 
+        // ------------------------------------------------------------------
+        // IL 钩子：识别"偷体力跳让体力超过上限"这一行
+        // ------------------------------------------------------------------
+        // 为什么必须用 IL 钩子？
+        //   原版有两条会让体力超过上限的途径，性质完全相反，必须区别对待：
+        //
+        //     技巧溢出（放行）： ldfld Stamina / ldc.r4 27.5 / add / stfld Stamina
+        //     落地回满（钳制）： ldc.r4 110 / stfld Stamina
+        //
+        //   它们都在 Player.orig_Update 里，用普通钩子没法区分到"哪一行"。
+        //   IL 钩子能精确匹配那个 add 序列（实测全游戏只有这一处）。
+        //
+        // ★ 目标方法名是 orig_Update（MonoMod 生成的 vanilla 版本）。
+        //   实测 NormalUpdate 里【没有】这段代码，所以只需挂这一个方法。
+        MethodInfo playerUpdate = typeof(Player).GetMethod(
+            "orig_Update", BindingFlags.Public | BindingFlags.Instance);
+
+        if (playerUpdate != null) {
+            wallBoostOverflowHook = new ILHook(playerUpdate, HookWallBoostOverflow);
+        } else {
+            Logger.Log(LogLevel.Warn, "PeakStamina",
+                "找不到 Player.orig_Update，偷体力跳的溢出将无法被识别（体力会被钳制到上限）");
+        }
+
         Logger.Log(LogLevel.Info, "PeakStamina", "Load() 执行了，钩子已挂上！");
     }
-
     public override void Unload() {
         On.Celeste.Level.LoadLevel -= OnLoadLevel;
         On.Celeste.Level.Reload -= OnLevelReload;
@@ -93,7 +122,76 @@ public class PeakStaminaModule : EverestModule {
         duckingHook?.Dispose();
         duckingHook = null;
 
+        wallBoostOverflowHook?.Dispose();
+        wallBoostOverflowHook = null;
+
         Logger.Log(LogLevel.Info, "PeakStamina", "Unload() 执行了，钩子已摘下。");
+    }
+
+    // ------------------------------------------------------------------
+    //  IL 钩子：识别"偷体力跳让体力超过上限"
+    // ------------------------------------------------------------------
+    // 匹配的指令序列（实测 Player.orig_Update IL_0419 附近，全游戏仅此一处）：
+    //
+    //     ldarg.0
+    //     ldfld   Player::Stamina
+    //     ldc.r4  27.5
+    //     add
+    //     stfld   Player::Stamina
+    //
+    // 在这条 stfld 【之后】插一句：通知 tracker "这份超额是技巧挣来的"。
+    //
+    // ★ 为什么不能只匹配 ldc.r4 + stfld？
+    //   那样会同时命中"落地回满"（ldc.r4 110 / stfld Stamina）和
+    //   "无限体力 Assist"（同样 ldc.r4 110）。那两个是【必须钳制】的，
+    //   误放行会让摔伤惩罚失效。必须靠中间的 `add` 把它们区分开。
+    private static void HookWallBoostOverflow(ILContext il) {
+        ILCursor cursor = new ILCursor(il);
+
+        FieldInfo staminaField = typeof(Player).GetField(
+            "Stamina", BindingFlags.Public | BindingFlags.Instance);
+
+        MethodInfo notify = typeof(PeakStaminaModule).GetMethod(
+            nameof(NotifyWallBoostOverflow), BindingFlags.NonPublic | BindingFlags.Static);
+
+        if (staminaField == null || notify == null) {
+            Logger.Log(LogLevel.Warn, "PeakStamina",
+                "找不到 Player.Stamina 字段或通知方法，偷体力跳的溢出将无法被识别");
+            return;
+        }
+
+        int patched = 0;
+
+        // while 而不是 if：万一原版别处也有同样序列，一并挂上更保险
+        //
+        // CL0006：分析器建议把多个条件拆成多次 GotoNext 调用。
+        // 这里【刻意】不拆 —— 我们要匹配的就是这四条【必须连续相邻】的指令，
+        // 拆开反而会让"中间被插入了别的指令"这种情况被误判成匹配成功。
+#pragma warning disable CL0006
+        while (cursor.TryGotoNext(
+            MoveType.After,
+            i => i.MatchLdfld(staminaField),
+            i => i.MatchLdcR4(27.5f),
+            i => i.MatchAdd(),
+            i => i.MatchStfld(staminaField))) {
+#pragma warning restore CL0006
+
+            // 这段代码在 Player 实例方法里，拦截点位于 stfld 之后，
+            // 所以直接取 ldarg.0 就是玩家实例。
+            cursor.EmitLdarg(0);
+            cursor.EmitCall(notify);
+
+            patched++;
+        }
+
+        Logger.Log(LogLevel.Info, "PeakStamina",
+            $"IL 钩子已挂上：wall boost 溢出识别（匹配到 {patched} 处）");
+    }
+
+    // 由上面的 IL 钩子调用（静态，方便 EmitCall 直接引用）。
+    // 参数就是那个玩家实例。
+    private static void NotifyWallBoostOverflow(Player player) {
+        player?.Components.Get<StaminaTracker>()?.NotifyWallBoostOverflow();
     }
 
     // 玩家把 Ducking 设成 true 时：如果他正贴着地面，就记下这次"贴地下蹲"。

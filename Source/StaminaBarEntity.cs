@@ -133,15 +133,19 @@ public class StaminaBarDisplay : Component {
         //    这样所有段落的长度可以直接相加、永远铺满整条。
         float baseMax = StaminaTracker.BaseMaxStamina;
 
-        float currentStamina = Calc.Clamp(player.Stamina, 0f, baseMax);
+        // ★ 体力可以超过上限（偷体力跳的收益），所以这里【不】夹到 baseMax：
+        //   绿段会画出方框之外，作为"超额体力"的视觉提示。
+        //   Clamp 只保证不下负数。
+        float currentStamina = Calc.Max(player.Stamina, 0f);
         float currentCap     = Calc.Clamp(PeakStaminaModule.Session.StaminaCap, 0f, baseMax);
 
-        // 防御：体力理论上不会超过上限，但万一其他 mod 干扰了，
-        // 这里兜一下，避免黑段算出负数、把后面的伤害段推歪。
-        currentStamina = Calc.Min(currentStamina, currentCap);
+        // 黑段表示的永远是"上限之内、还没用掉的部分"。
+        // 体力高于上限时，超出部分【不算进黑段】（否则黑段会算出负数，
+        // 把后面的伤害段整体推歪）。
+        float cappedStamina = Calc.Min(currentStamina, currentCap);
 
         float greenWidth = pixelWidth * (currentStamina / baseMax);
-        float blackWidth = pixelWidth * ((currentCap - currentStamina) / baseMax);
+        float blackWidth = pixelWidth * ((currentCap - cappedStamina) / baseMax);
 
         // ⑤ 从左到右画：绿 → 黑 → 各伤害段
         float x = left;

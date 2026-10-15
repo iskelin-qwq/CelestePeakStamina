@@ -298,7 +298,7 @@ public class StaminaTracker : Component {
             return;
         }
 
-        float baseline = Calc.Min(staminaAtFrameStart, MaxStamina);
+        float baseline = SpendBaseline;
         float target = Calc.Max(baseline - amount, 0f);
 
         player.Stamina = target;
@@ -587,7 +587,7 @@ public class StaminaTracker : Component {
 
         // 和其他动作一样：从"上一帧收口后的干净体力"上扣，
         // 不能直接读 player.Stamina（冲刺键处理时它可能刚被原版回满）。
-        float baseline = Calc.Min(staminaAtFrameStart, MaxStamina);
+        float baseline = SpendBaseline;
         float target = Calc.Max(baseline - DashStaminaCost, 0f);
 
         // 立刻压到目标值，让体力条的反馈及时
@@ -1059,7 +1059,9 @@ public class StaminaTracker : Component {
         // ★ 记录这一帧"干净"的体力值，供下一次动作扣费当基准
         // ------------------------------------------------------------------
         // 此时玩家自己的 Update 已经跑完、ClampPlayerStamina 也已经执行，
-        // 所以这个值一定不超过上限，是可靠的读数。
+        // 所以这个值一定不超过【硬天花板 StaminaCeiling】，是可靠的读数。
+        //（天花板可能是"上限 + 27.5"——偷体力跳攒出的溢出也算玩家的体力，
+        //  扣费时必须算进去，见 SpendBaseline 的说明。）
         //
         // 为什么不能等到动作发生时再读 player.Stamina？
         //   因为跳跃 / 冲刺的按键都是在玩家自己的 Update 里处理的，
@@ -1205,13 +1207,67 @@ public class StaminaTracker : Component {
     }
 
     // ------------------------------------------------------------------
-    //  内部：把玩家体力收口到上限以内
+    //  内部：把玩家体力收口到"允许的上限以内"
     // ------------------------------------------------------------------
-    private void ClampPlayerStamina() {
-        float cap = MaxStamina;
+    //  ★★ 为什么要区分"落地回满"和"技巧溢出"？★★
+    //
+    //   原版有两条会让体力超过上限的途径，但性质完全不同：
+    //
+    //     ① 落地回满 —— 原版无条件 `Stamina = 110f`，不知道我们的可变上限。
+    //        如果不约束，上限 85 的玩家落地就被补到 110，等于摔伤没惩罚。
+    //        → 【必须钳制到上限】
+    //
+    //     ② 偷体力跳（wall boost）—— 原版 `Stamina += 27.5f`。
+    //        又因为【在地面上爬墙跳是免费的】（ClimbJump 的 onGround 分支），
+    //        所以这是玩家的技巧收益，用来攒额外体力应对难关。
+    //        → 【必须放行】
+    //
+    //   两者在 IL 上是可区分的（实测）：
+    //       技巧溢出： ldfld Stamina / ldc.r4 27.5 / add / stfld Stamina
+    //       落地回满： ldc.r4 110 / stfld Stamina
+    //   所以我们在技巧溢出那一处挂 IL 钩子，把 allowOverflow 置位。
+    //
+    //   ★ 没有 allowOverflow 时，上限就是硬天花板 —— 落地回满会被压回来，
+    //     摔伤惩罚得以保留。
+    private const float StaminaOverflow = 27.5f;
 
-        if (player.Stamina > cap) {
-            player.Stamina = cap;
+    // "当前这份超额体力是技巧挣来的"。
+    // 由 On.Celeste.Player.orig_Update 的 IL 钩子在 wall boost 生效时置位，
+    // 体力回落到上限以内（或上限本身被削）时自动清除。
+    private bool allowOverflow;
+
+    // 真正的硬天花板（任何时候都不允许超过）。
+    // 去掉余量，是因为超出量完全由 allowOverflow 决定。
+    public float StaminaCeiling => MaxStamina + (allowOverflow ? StaminaOverflow : 0f);
+
+    // 动作扣费可用的"起扣点"。
+    //
+    // ★ 为什么是 StaminaCeiling 而不是 MaxStamina？
+    //   偷体力跳攒出的超额体力【也是玩家的体力】，扣费时必须算进去。
+    //   如果夹到 MaxStamina，就会表现成"冲刺不从偷来的体力里扣，
+    //   而是从 110 重新算起"——玩家辛苦攒的溢出被凭空丢掉。
+    //
+    //   举例（上限 110、溢出到 137.5）：
+    //       夹到 MaxStamina  → 扣 35 后剩 75   ✗ 溢出被丢了
+    //       夹到 StaminaCeiling → 扣 35 后剩 102.5 ✔
+    private float SpendBaseline => Calc.Min(staminaAtFrameStart, StaminaCeiling);
+
+    // 由 IL 钩子调用：wall boost 刚刚生效（体力被 +27.5）
+    public void NotifyWallBoostOverflow() {
+        allowOverflow = true;
+    }
+
+    private void ClampPlayerStamina() {
+        // 体力已经回落到上限以内 → 这次溢出的生命周期结束，
+        // 清除标记。这样玩家消耗掉溢出的部分之后，落地回满会重新被钳制。
+        if (allowOverflow && player.Stamina <= MaxStamina) {
+            allowOverflow = false;
+        }
+
+        float ceiling = StaminaCeiling;
+
+        if (player.Stamina > ceiling) {
+            player.Stamina = ceiling;
         } else if (player.Stamina < 0f) {
             // 顺手兜一下负数，防止原版某些极端状态下体力算成负数
             player.Stamina = 0f;

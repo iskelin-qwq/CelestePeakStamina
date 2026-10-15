@@ -8,3 +8,6 @@ bin/
 # 忽略项目测试构建结果
 Source/bin/
 Source/obj/
+
+# 忽略Release构建的产物
+PeakStamina.zip
